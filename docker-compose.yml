@@ -1,0 +1,172 @@
+version: '3.8'
+
+services:
+  # DataSteward.ai Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://datasteward:datasteward@postgres:5432/datasteward
+      - OPENMETADATA_URL=http://openmetadata:8585
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY:-}
+      - PRIVACY_MODE=local_first
+      - TRANSPARENCY_LOGGING=true
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_PRIVACY_MODE=user_choice
+      - REACT_APP_TRANSPARENCY_ENABLED=true
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=datasteward
+      - POSTGRES_USER=datasteward
+      - POSTGRES_PASSWORD=datasteward
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datasteward"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and session management
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # OpenMetadata (Data Catalog)
+  openmetadata:
+    image: openmetadata/server:1.3.1
+    ports:
+      - "8585:8585"
+    environment:
+      - OPENMETADATA_CLUSTER_NAME=datasteward-cluster
+      - DB_DRIVER_CLASS=org.postgresql.Driver
+      - DB_SCHEME=postgresql
+      - DB_USE_SSL=false
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=datasteward
+      - DB_USER_PASSWORD=datasteward
+      - DB_DATABASE=openmetadata_db
+      - ELASTICSEARCH_HOST=elasticsearch
+      - ELASTICSEARCH_PORT=9200
+      - ELASTICSEARCH_SCHEME=http
+      - ELASTICSEARCH_USERNAME=""
+      - ELASTICSEARCH_PASSWORD=""
+    depends_on:
+      - postgres
+      - elasticsearch
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8585/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Elasticsearch for OpenMetadata search
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.10.2
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1024m -Xmx1024m
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Local LLM (Ollama) - Optional for privacy-first mode
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    restart: unless-stopped
+    profiles:
+      - local-llm
+
+  # Adventure Works Demo Database
+  adventure-works:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=DataSteward123!
+      - MSSQL_PID=Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - ./data/adventure-works:/var/opt/mssql/backup
+      - adventure_works_data:/var/opt/mssql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P DataSteward123! -Q 'SELECT 1'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+  redis_data:
+  elasticsearch_data:
+  ollama_data:
+  adventure_works_data:
+
+networks:
+  default:
+    name: datasteward-network
